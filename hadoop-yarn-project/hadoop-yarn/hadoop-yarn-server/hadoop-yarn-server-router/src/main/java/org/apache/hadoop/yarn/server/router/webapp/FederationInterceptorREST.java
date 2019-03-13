@@ -660,19 +660,24 @@ public class FederationInterceptorREST extends AbstractRESTRequestInterceptor {
     // Don't wait for completion.
     for (SubClusterInfo info : subClustersActive.values()) {
       if (info.getSubClusterId() != homeSubClusterId) {
-        this.threadpool.submit(new Callable<Void>() {
+        this.threadpool.submit(new Runnable() {
           @Override
-          public Void call() {
+          public void run() {
             DefaultRequestInterceptorREST interceptor =
                 getOrCreateInterceptorForSubCluster(
                     info.getSubClusterId(), info.getRMWebServiceAddress());
             try {
-              interceptor.updateAppState(targetState, hsrCopy, appId);
-              return null;
+              Response response = interceptor.updateAppState(targetState, hsrCopy, appId);
+              if (response.getStatus() == Status.OK.getStatusCode()) {
+                LOG.info("UpdateAppState request to application {} in SubCluster {} succeeded.",
+                    appId, info.getSubClusterId());
+              } else {
+                LOG.error("UpdateAppState request to application {} in SubCluster {} failed. Response code: {}",
+                    appId, info.getSubClusterId(), response.getStatus());
+              }
             } catch (Exception e) {
               LOG.error("UpdateAppState request to application {} in SubCluster {} throws exception {}",
                   appId, info.getSubClusterId(), e);
-              return null;
             }
           }
         });
