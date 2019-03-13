@@ -585,8 +585,7 @@ public class FederationInterceptorREST extends AbstractRESTRequestInterceptor {
   }
 
   /**
-   * The Yarn Router will forward to the respective Yarn RM in which the AM is
-   * running.
+   * The YARN Router will forward to all sub clusters.
    * <p>
    * Possible failures and behaviors:
    * <p>
@@ -619,11 +618,11 @@ public class FederationInterceptorREST extends AbstractRESTRequestInterceptor {
     }
 
     SubClusterInfo subClusterInfo = null;
-    SubClusterId subClusterId = null;
+    SubClusterId homeSubClusterId = null;
     try {
-      subClusterId =
+      homeSubClusterId =
           federationFacade.getApplicationHomeSubCluster(applicationId);
-      subClusterInfo = federationFacade.getSubCluster(subClusterId);
+      subClusterInfo = federationFacade.getSubCluster(homeSubClusterId);
     } catch (YarnException e) {
       routerMetrics.incrAppsFailedKilled();
       return Response
@@ -632,12 +631,47 @@ public class FederationInterceptorREST extends AbstractRESTRequestInterceptor {
           .build();
     }
 
-    Response response = getOrCreateInterceptorForSubCluster(subClusterId,
+    Response response = getOrCreateInterceptorForSubCluster(homeSubClusterId,
         subClusterInfo.getRMWebServiceAddress()).updateAppState(targetState,
             hsr, appId);
 
     long stopTime = clock.getTime();
     routerMetrics.succeededAppsRetrieved(stopTime - startTime);
+
+    Map<SubClusterId, SubClusterInfo> subClustersActive = null;
+    try {
+      subClustersActive = federationFacade.getSubClusters(true);
+    } catch (YarnException e) {
+      routerMetrics.incrMultipleAppsFailedRetrieved();
+      return null;
+    }
+
+    // HttpServletRequest does not work with ExecutorCompletionService.
+    // Create a duplicate hsr.
+    final HttpServletRequest hsrCopy = clone(hsr);
+
+    // Broadcast UpdateAppState to all secondary sub clusters.
+    // Don't wait for completion.
+    for (SubClusterInfo info : subClustersActive.values()) {
+      if (info.getSubClusterId() != homeSubClusterId) {
+        this.threadpool.submit(new Callable<Void>() {
+          @Override
+          public Void call() {
+            DefaultRequestInterceptorREST interceptor =
+                getOrCreateInterceptorForSubCluster(
+                    info.getSubClusterId(), info.getRMWebServiceAddress());
+            try {
+              interceptor.updateAppState(targetState, hsrCopy, appId);
+              return null;
+            } catch (Exception e) {
+              LOG.error("UpdateAppState request to application {} in SubCluster {} throws exception {}",
+                  appId, info.getSubClusterId(), e);
+              return null;
+            }
+          }
+        });
+      }
+    }
 
     return response;
   }
